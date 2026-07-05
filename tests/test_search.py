@@ -5,6 +5,7 @@ Tests for song search logic.
 """
 
 import pytest
+from sqlalchemy import event
 from app import create_app, db
 from models import User, Song, Tag, song_tags
 from services.search_service import search_songs
@@ -117,3 +118,43 @@ def test_search_returns_empty_for_no_match(app, seed_songs):
     with app.app_context():
         results = search_songs("zzz_no_match_zzz")
         assert results == []
+
+
+def test_search_does_not_join_song_tags_table(app, seed_songs):
+    """
+    Regression test for Issue #3: search_songs() must not join song_tags.
+
+    The original query joined Song to song_tags via outerjoin even though
+    tags are never filtered or selected on, so a song with N tags produced
+    N raw joined rows in the result set (verified directly: 3 rows for the
+    3-tag fixture song). That fan-out never showed up as a failing test
+    here because db.session.query(Song).all() — the legacy ORM Query API —
+    auto-uniques full-entity results by primary key. The identical filter
+    executed through SQLAlchemy's modern session.execute(select(...))
+    .scalars().all() does NOT auto-unique, so the same join would produce
+    real, user-visible duplicates the moment this code (or a copy of its
+    query pattern) is run through that API. This test captures the actual
+    SQL search_songs() sends to the database and asserts song_tags never
+    appears in it, so the join can't silently come back.
+
+    Note: search_songs() legitimately issues a *second* query to eager-load
+    each song's `tags` (Song.tags is `lazy="subquery"`), and that query does
+    reference song_tags — that's expected and unrelated to the bug. Only the
+    first query (the title/artist filter against the `song` table) is the
+    one that must not join song_tags.
+    """
+    with app.app_context():
+        statements = []
+
+        def capture(conn, cursor, statement, parameters, context, executemany):
+            statements.append(statement)
+
+        event.listen(db.engine, "before_cursor_execute", capture)
+        try:
+            search_songs("Crown Heights")
+        finally:
+            event.remove(db.engine, "before_cursor_execute", capture)
+
+        assert statements, "expected search_songs to execute a query"
+        main_query = statements[0]
+        assert "song_tags" not in main_query
