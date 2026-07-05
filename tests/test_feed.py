@@ -68,3 +68,26 @@ def test_old_friend_listen_does_not_show_up(app, users):
         result = get_friends_listening_now(me.id)
         print("old listen result:", result)
         assert result == []
+
+
+def test_yesterday_friend_listen_does_not_show_up(app, users):
+    """
+    Regression test for Issue #2: a listen from 2 hours ago must NOT show up.
+
+    2 hours falls inside the old buggy RECENT_THRESHOLD (24 hours) but
+    outside the correct one (30 minutes), so this is the one boundary value
+    that actually distinguishes "fixed" from "still broken" — unlike a
+    3-day-old event, which fails under either threshold and would pass even
+    against the buggy code.
+    """
+    with app.app_context():
+        me, friend = users
+        song = Song(title="Yesterday Song", artist="Test Artist", shared_by=me.id)
+        db.session.add(song)
+        db.session.commit()
+
+        _listen(friend, song, datetime.now(timezone.utc) - timedelta(hours=2))
+
+        result = get_friends_listening_now(me.id)
+        print("2-hours-ago listen result:", result)
+        assert result == []
